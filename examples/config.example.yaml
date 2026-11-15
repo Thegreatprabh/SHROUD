@@ -1,0 +1,36 @@
+# SHROUD example configuration.
+# Copy to your own file (e.g. shroud.yaml) and pass it with:
+#   shroud protect app.js --engine js --out protected --config shroud.yaml
+#
+# Every key below is optional. Anything you leave out keeps the default.
+# Unknown keys inside the `js` / `py` sections are rejected (fail closed),
+# so a typo such as `strnig_encryption` fails loudly instead of silently
+# leaving a protection off. Unknown top-level keys are only warned about.
+
+# Seed for deterministic protection: the same seed + same input gives
+# the same protected output. Must be an integer.
+seed: 1337
+
+js:
+  rename: true
+  string_encryption: true
+  flatten: true
+  literal_encoding: true
+  dead_code: true
+  anti_debug: true
+  integrity: true
+  # Hostnames the protected code is allowed to run on. Empty means no
+  # domain lock. Example: ["app.example.com", "example.com"]
+  domain_lock: []
+
+py:
+  rename: true
+  string_encryption: true
+  flatten: true
+  literal_encoding: true
+  dead_code: true
+  anti_debug: true
+  integrity: true
+  # Optional license key checked by the delivered runtime. Empty means
+  # no license check.
+  license_key: ""

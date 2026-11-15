@@ -1,0 +1,11 @@
+{
+  "name": "shroud-js-protect",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SHROUD JavaScript protection transforms (esprima AST + escodegen emit)",
+  "license": "MIT",
+  "dependencies": {
+    "esprima": "^4.0.1",
+    "escodegen": "^2.0.0"
+  }
+}

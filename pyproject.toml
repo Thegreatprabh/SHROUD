@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shroud"
+version = "0.1.0"
+description = "SHROUD — a CLI code protector for JavaScript and Python."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "pyyaml",
+]
+
+[project.scripts]
+shroud = "shroud.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["shroud*"]
+
+[tool.setuptools.package-data]
+shroud = [
+    "demo/*",
+    # JavaScript engine data files (located via Path(__file__) in
+    # shroud/js/engine.py; protect.js reads ../runtime.js; ensure_node_deps
+    # runs `npm install` in js/node, needing package.json + lockfile).
+    # Listed explicitly (not js/node/*) so node_modules/ is never swept
+    # into the wheel.
+    "js/runtime.js",
+    "js/node/protect.js",
+    "js/node/package.json",
+    "js/node/package-lock.json",
+]
