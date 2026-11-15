@@ -1,47 +1,43 @@
 # SHROUD
 
-SHROUD is a command-line code protector for JavaScript and Python. It
-rewrites source code so that it is harder to read and harder to reverse
-engineer, while keeping its behaviour identical: the protected program
-prints the same output, exits with the same code, and reads the same
-input as the original.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
+[![Node 24+](https://img.shields.io/badge/Node-24%2B-green.svg)](https://nodejs.org/)
+[![Tests: 190 passing](https://img.shields.io/badge/Tests-190%20passing-brightgreen.svg)](#tests)
+
+**Turn any app or website into a black box.** SHROUD is a command-line
+code protector for JavaScript and Python. It rewrites source code so
+that it is harder to read and harder to reverse engineer — while
+keeping its behaviour identical: the protected program prints the same
+output, exits with the same code, and reads the same input as the
+original.
 
 ```text
 original.js  ──►  shroud protect  ──►  protected.js   (same behaviour)
 original.py  ──►  shroud protect  ──►  protected.py   (same behaviour)
 ```
 
-## What SHROUD is — and what it is not
+> **Honest note:** no protection is literally un-reverse-engineerable,
+> and no tool can make it so — code that runs can be analysed. SHROUD
+> raises the cost of reversing your code until it is not worth the
+> attacker's time. The full threat model, including what SHROUD
+> deliberately does *not* hide, is in
+> [What SHROUD is — and what it is not](#what-shroud-is--and-what-it-is-not).
 
-SHROUD raises the cost of reversing your code. It does not make
-reversal impossible, and no tool can: **no protection is literally
-un-reverse-engineerable**. Anyone who receives the protected files can
-study them for as long as they like, and a determined attacker with
-full access can eventually undo every transform below.
+## Contents
 
-Be clear about the threat model before relying on SHROUD:
-
-- **The decryption key lives in the delivered runtime.** Protected
-  Python code ships with `shroud_runtime.py`, and protected JavaScript
-  ships with its decoder inline. The key that unscrambles the strings
-  is in the same delivery as the scrambled strings. SHROUD hides the
-  key among the transforms; it does not — and cannot — keep it from
-  someone who owns the files.
-- **Domain lock and integrity checks are speed bumps, not security
-  boundaries.** They stop casual copying and casual tampering. They do
-  not stop an attacker who edits the check out of the delivered code,
-  which is always possible because the check itself is delivered.
-- **Anti-debug checks detect common debuggers; they do not defeat a
-  skilled analyst.** They raise the effort required, nothing more.
-- **SHROUD protects code, not data.** Configuration files, assets,
-  embedded credentials, and API keys shipped next to the code are not
-  protected by SHROUD. Do not ship secrets and expect SHROUD to hide
-  them.
-
-Use SHROUD to deter casual copying, to slow down competitors, and to
-make casual tampering fail loudly. Do not use it as the only line of
-defence for anything whose secrecy must hold against a motivated
-attacker. For that, keep the sensitive logic on a server you control.
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [What you get](#what-you-get)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [How each protection works](#how-each-protection-works)
+- [What SHROUD is — and what it is not](#what-shroud-is--and-what-it-is-not)
+- [Limitations](#limitations)
+- [Inventory](#inventory)
+- [Tests](#tests)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Install
 
@@ -121,6 +117,42 @@ anti-debug: present
 
 (The exact markers present depend on the options in force; the example
 above is from the default configuration, with no domain lock set.)
+
+Every command in this section is covered by a test:
+`tests/test_e2e.py` runs the quickstart commands verbatim, so the
+block above is never stale.
+
+## What you get
+
+One CLI, two engines, eight protections. Every protection is on by
+default and can be switched off individually in the config file.
+
+| Protection | JavaScript | Python |
+| --- | --- | --- |
+| Identifier renaming | ✅ scope-aware, per-function | ✅ scope-aware, kwargs and `match` captures handled |
+| String encryption | ✅ XOR + base64, inline decoder | ✅ XOR + base64 via `shroud_runtime.dec` |
+| Control-flow flattening | ✅ switch-based state dispatch | ✅ `while True` + `__state` dispatch |
+| Literal encoding | ✅ numbers as arithmetic | ✅ integers as additions |
+| Dead code injection | ✅ junk statements and functions | ✅ `if False:` blocks and a junk function |
+| Anti-debug | ✅ debugger check | ✅ `sys.gettrace()` + `sys.monitoring` |
+| Integrity check | ✅ SHA-256 of the string table | ✅ SHA-256 manifest over all protected files |
+| Environment binding | ✅ domain lock (hostnames) | ✅ license key (`SHROUD_LICENSE_KEY`) |
+
+Plus:
+
+- **Directory mode** — protect a whole project in one command; the
+  subdirectory layout is preserved, and the Python integrity manifest
+  covers every file.
+- **Deterministic output** — the same seed and the same input produce
+  the same protected output, so protection is reproducible and
+  diffable.
+- **`verify` built in** — run the original and the protected file and
+  compare stdout, stderr, and exit code. Identical behaviour is the
+  contract, and `verify` is how you prove it.
+- **Modern JavaScript** — optional chaining, nullish coalescing, and
+  private class fields, through ES2025, via the `acorn` parser.
+- **Fail-closed config** — a misspelled flag fails loudly instead of
+  silently leaving a protection off.
 
 ## Usage
 
@@ -301,6 +333,38 @@ Validation rules (`shroud/config.py`):
   the environment variable `SHROUD_LICENSE_KEY` and compares its
   SHA-256 hash against the embedded hash.
 
+## What SHROUD is — and what it is not
+
+SHROUD raises the cost of reversing your code. It does not make
+reversal impossible, and no tool can: **no protection is literally
+un-reverse-engineerable**. Anyone who receives the protected files can
+study them for as long as they like, and a determined attacker with
+full access can eventually undo every transform above.
+
+Be clear about the threat model before relying on SHROUD:
+
+- **The decryption key lives in the delivered runtime.** Protected
+  Python code ships with `shroud_runtime.py`, and protected JavaScript
+  ships with its decoder inline. The key that unscrambles the strings
+  is in the same delivery as the scrambled strings. SHROUD hides the
+  key among the transforms; it does not — and cannot — keep it from
+  someone who owns the files.
+- **Domain lock and integrity checks are speed bumps, not security
+  boundaries.** They stop casual copying and casual tampering. They do
+  not stop an attacker who edits the check out of the delivered code,
+  which is always possible because the check itself is delivered.
+- **Anti-debug checks detect common debuggers; they do not defeat a
+  skilled analyst.** They raise the effort required, nothing more.
+- **SHROUD protects code, not data.** Configuration files, assets,
+  embedded credentials, and API keys shipped next to the code are not
+  protected by SHROUD. Do not ship secrets and expect SHROUD to hide
+  them.
+
+Use SHROUD to deter casual copying, to slow down competitors, and to
+make casual tampering fail loudly. Do not use it as the only line of
+defence for anything whose secrecy must hold against a motivated
+attacker. For that, keep the sensitive logic on a server you control.
+
 ## Limitations
 
 Verified against the Python engine implementation
@@ -376,15 +440,21 @@ contract, and verification is part of using the tool.
 | `pyproject.toml` | Project metadata, `pyyaml` dependency, `shroud` console script |
 | `LICENSE` | MIT License, Copyright (c) 2026 Prabhjot Singh |
 | `.gitignore` | Ignores `.venv/`, `__pycache__/`, `*.pyc`, `node_modules/`, `*.egg-info/`, `dist/`, `build/` |
+| `tests/__init__.py` | Test package marker |
 | `tests/test_cli.py` | CLI tests: `protect`, `inspect`, `verify`, `demo`, in-process and via `python -m shroud` |
 | `tests/test_config.py` | Config tests: defaults, example file, invalid YAML, wrong types, unknown keys, merging |
 | `tests/test_e2e.py` | End-to-end tests for both engines, plus the README quickstart commands run verbatim |
 | `tests/test_js.py` | JavaScript engine tests: one class per transform, plus behaviour equivalence via Node |
 | `tests/test_py.py` | Python engine tests: one class per transform, plus runtime checks (integrity, anti-debug, license) |
+| `tests/test_audit_r1_py_transforms.py` | Audit round 1 regression tests: kwargs, `match` captures, `eval`, lambda handling |
+| `tests/test_audit_r1_py_engine.py` | Audit round 1 regression tests: `__future__` imports, module `__doc__`, `match` literals, `sys.monitoring`, quoted filenames |
+| `tests/test_audit_r1_js.py` | Audit round 1 regression tests: JS `eval`/`with` taint, modern JS (`?.`, `??`, `#x`), domain-lock case |
+| `tests/test_audit_r1_cli.py` | Audit round 1 regression tests: directory layout, multi-file integrity manifest, CLI error paths |
+| `tests/test_packaging.py` | Wheel contents checks plus an installed-wheel end-to-end test (fresh venv, non-editable install) |
 
 ## Tests
 
-Tests are `unittest` only (run from the repository root):
+190 tests, `unittest` only (run from the repository root):
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -395,7 +465,25 @@ python3 -m unittest discover -s tests -v
 and via subprocess (`python -m shroud`), using temporary directories
 — tests never write into the repository tree. `tests/test_e2e.py`
 protects both bundled demos, runs the originals against the protected
-copies, and runs every README quickstart command verbatim.
+copies, and runs every README quickstart command verbatim. The four
+`tests/test_audit_r1_*.py` files are the regression tests for the
+audit round 1 findings (one test per finding), and
+`tests/test_packaging.py` installs the built wheel into a fresh
+virtual environment and runs `shroud protect` from it, so a packaging
+regression that breaks the installed CLI is caught.
+
+## Contributing
+
+Issues and pull requests are welcome. Please:
+
+1. Open an issue first for anything that changes behaviour, so the
+   fix and its regression test can be agreed before code is written.
+2. Add a regression test for every fix — a fix without a test that
+   fails before it and passes after it will not be merged.
+3. Run the full suite (`python3 -m unittest discover -s tests`)
+   and the README quickstart before opening the pull request.
+4. Keep the threat model honest: if a change weakens a protection,
+   say so in the pull request and update the README to match.
 
 ## License
 
