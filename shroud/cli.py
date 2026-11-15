@@ -154,30 +154,50 @@ def _cmd_protect(args):
 
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
+        # One options dict per engine, built once and reused for every
+        # file of that engine. Besides avoiding repeat work, sharing
+        # one dict keeps the per-build key consistent: with seed None
+        # the engine stores a fresh key back into the dict on first
+        # use, so protect-then-write_runtime must see the same dict.
+        options_by_engine = {}
+        for _src, engine in jobs:
+            if engine not in options_by_engine:
+                options_by_engine[engine] = merge_options(
+                    config, engine, overrides
+                )
         js_deps_ready = False
-        py_runtime_written = False
+        py_protected = False
         protected = 0
         engines_used = []
         for src, engine in jobs:
-            options = merge_options(config, engine, overrides)
+            options = options_by_engine[engine]
+            if input_path.is_dir():
+                # Preserve the tree: flattening would collide
+                # same-named files from different subdirectories.
+                dst = out_dir / src.relative_to(input_path)
+            else:
+                dst = out_dir / src.name
+            # The JS engine does not create parent dirs itself.
+            dst.parent.mkdir(parents=True, exist_ok=True)
             if engine == "js":
                 if not js_deps_ready:
                     ensure_node_deps, protect_js_file = _load_js_engine()
                     ensure_node_deps()
                     js_deps_ready = True
-                dst = out_dir / src.name
                 protect_js_file(str(src), str(dst), options)
             else:
                 protect_py_file, write_runtime = _load_py_engine()
-                dst = out_dir / src.name
                 protect_py_file(str(src), str(dst), options)
-                if not py_runtime_written:
-                    write_runtime(str(out_dir), options)
-                    py_runtime_written = True
+                py_protected = True
             protected += 1
             if engine not in engines_used:
                 engines_used.append(engine)
-    except (ProtectionError, ConfigError) as exc:
+        if py_protected:
+            # Write the runtime/manifest ONCE, after ALL files are
+            # protected, so the manifest covers every protected file.
+            protect_py_file, write_runtime = _load_py_engine()
+            write_runtime(str(out_dir), options_by_engine["py"])
+    except (ProtectionError, ConfigError, OSError, UnicodeDecodeError) as exc:
         print("Error: %s" % exc, file=sys.stderr)
         return 1
 
@@ -256,7 +276,11 @@ def _cmd_inspect(args):
     if not path.is_file():
         print("Error: file not found: %s" % args.file, file=sys.stderr)
         return 1
-    text = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print("Error: cannot read %s: %s" % (args.file, exc), file=sys.stderr)
+        return 1
 
     # Engine guess from markers first, file extension as a fallback.
     if "shroud_runtime" in text or "shroud_runtime.dec" in text:
@@ -348,7 +372,9 @@ def _cmd_demo(args):
                     write_runtime(tmp, options)
                 orig_out, orig_err, orig_code = _run_file(demo_src)
                 prot_out, prot_err, prot_code = _run_file(dst)
-        except (ProtectionError, ConfigError) as exc:
+        except (
+            ProtectionError, ConfigError, OSError, UnicodeDecodeError
+        ) as exc:
             print("Error: %s" % exc, file=sys.stderr)
             overall_ok = False
             continue

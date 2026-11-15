@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import base64
 import random
+import re
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,12 @@ def _skip_ids_for_strings(tree):
         if isinstance(node, ast.AnnAssign):
             for const in _collect_string_constants(node.annotation):
                 skip.add(id(const))
+        # Match patterns: a literal pattern must stay a literal — a
+        # dec() call is not valid pattern syntax (it parses as a class
+        # pattern and fails at runtime).
+        if isinstance(node, ast.match_case):
+            for const in _collect_string_constants(node.pattern):
+                skip.add(id(const))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for arg in (
                 list(node.args.posonlyargs) + list(node.args.args)
@@ -118,6 +125,10 @@ def _skip_ids_for_ints(tree):
                     _add_ints(key)
         if isinstance(node, ast.AnnAssign):
             _add_ints(node.annotation)
+        # Match patterns: an encoded int (e.g. `21 + 21`) is not valid
+        # pattern syntax. Subject/guard expressions are NOT skipped.
+        if isinstance(node, ast.match_case):
+            _add_ints(node.pattern)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for arg in (
                 list(node.args.posonlyargs) + list(node.args.args)
@@ -233,6 +244,16 @@ def _names_assigned_direct(func):
         elif isinstance(node, ast.ExceptHandler):
             if node.name:
                 assigned.add(node.name)
+        elif isinstance(node, ast.MatchAs):
+            # Capture pattern: binds a name in the enclosing scope.
+            if node.name:
+                assigned.add(node.name)
+        elif isinstance(node, ast.MatchStar):
+            if node.name:
+                assigned.add(node.name)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest:
+                assigned.add(node.rest)
         for child in ast.iter_child_nodes(node):
             _visit(child)
 
@@ -327,6 +348,11 @@ class RenameTransformer(ast.NodeTransformer):
         # Stack of (mapping, comprehension-shadow sets).
         self._scope_stack = []
         self._comp_shadow_stack = []
+        # Precomputed per-function mappings (id(node) -> mapping) and the
+        # call-site registry (function name -> {param: renamed}).
+        # Built by _build_registry() in visit_Module, before traversal.
+        self._precomputed = {}
+        self._registry = {}
 
     def _new_name(self, taken):
         while True:
@@ -349,8 +375,113 @@ class RenameTransformer(ast.NodeTransformer):
     # -- visitors ------------------------------------------------------
     def visit_Module(self, node):
         self._imported = _module_imported_names(node)
+        self._build_registry(node)
         self.generic_visit(node)
         return node
+
+    def _build_registry(self, tree):
+        """Precompute every function's rename mapping, in module order.
+
+        The mappings must match what the traversal would compute, so
+        definitions are collected in depth-first source order and the
+        rename counter is consumed exactly as ``_visit_function``
+        would consume it (outer function before its nested functions,
+        siblings in source order). ``_visit_function`` reuses the
+        precomputed mapping instead of recomputing it.
+
+        The registry maps unambiguous plain-function names to their
+        parameter renames, so ``visit_Call`` can rename keyword
+        arguments at the call site. Excluded from the registry (and
+        their parameters are left unrenamed):
+          * functions whose name is defined twice in the module — the
+            callee is ambiguous, so renaming either definition's
+            parameters could break a keyword call;
+          * functions called with a non-literal ``**`` unpacking
+            (``f(**d)``) — the runtime dict keys cannot be rewritten;
+          * functions aliased by direct assignment (``g = f``) — a
+            keyword call through the alias cannot be rewritten, because
+            the callee name is not in the registry;
+          * methods (functions directly inside a ClassDef) — attribute
+            calls are never rewritten at the call site (an external
+            object could have a same-named method), so a method
+            parameter whose name is used as a keyword argument
+            anywhere in the module, or belonging to a method called
+            via an attribute with keywords (named or ``**``), is left
+            unrenamed.
+        """
+        funcs = []  # (node, is_method) in depth-first source order
+        name_counts = {}
+
+        def _collect(node, parent_is_class):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs.append((node, parent_is_class))
+                name_counts[node.name] = name_counts.get(node.name, 0) + 1
+            for child in ast.iter_child_nodes(node):
+                _collect(child, isinstance(node, ast.ClassDef))
+
+        _collect(tree, False)
+
+        # Keyword argument names used anywhere, and method names called
+        # via an attribute with keywords.
+        all_kwarg_names = set()
+        attr_methods_with_kwargs = set()
+        # Callees called with a non-literal ** unpacking (``f(**d)``):
+        # the runtime dict keys cannot be rewritten, so the callee's
+        # parameters must stay unrenamed or the call breaks. And
+        # functions aliased by direct assignment (``g = f``): a keyword
+        # call through the alias cannot be rewritten either, because
+        # the callee name is not in the registry.
+        starstar_callees = set()
+        aliased = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg is not None:
+                        all_kwarg_names.add(kw.arg)
+                if isinstance(node.func, ast.Attribute) and node.keywords:
+                    # Named kwargs or a ** unpacking: either way the
+                    # method may be called with keyword arguments.
+                    attr_methods_with_kwargs.add(node.func.attr)
+                if isinstance(node.func, ast.Name):
+                    for kw in node.keywords:
+                        if kw.arg is None and not isinstance(kw.value, ast.Dict):
+                            starstar_callees.add(node.func.id)
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                value = node.value
+                if (value is not None and isinstance(value, ast.Name)
+                        and value.id in name_counts):
+                    aliased.add(value.id)
+
+        for node, is_method in funcs:
+            mapping = self._function_mapping(node)
+            params = (
+                list(node.args.posonlyargs) + list(node.args.args)
+                + list(node.args.kwonlyargs)
+            )
+            if node.args.vararg is not None:
+                params.append(node.args.vararg)
+            if node.args.kwarg is not None:
+                params.append(node.args.kwarg)
+            param_names = {a.arg for a in params}
+            if is_method:
+                for name in list(mapping):
+                    if name in param_names and (
+                        name in all_kwarg_names
+                        or node.name in attr_methods_with_kwargs
+                    ):
+                        del mapping[name]
+            elif (name_counts[node.name] > 1
+                    or node.name in starstar_callees
+                    or node.name in aliased):
+                for name in list(mapping):
+                    if name in param_names:
+                        del mapping[name]
+            else:
+                self._registry[node.name] = {
+                    name: new for name, new in mapping.items()
+                    if name in param_names
+                }
+            self._precomputed[id(node)] = mapping
 
     def _function_mapping(self, node):
         assigned = _names_assigned_direct(node)
@@ -366,7 +497,8 @@ class RenameTransformer(ast.NodeTransformer):
             if isinstance(child, (ast.Global, ast.Nonlocal)):
                 declared.update(child.names)
         # String literals in the function: a local whose name appears as
-        # a string could be looked up dynamically (getattr etc.) — be safe.
+        # a whole word inside ANY string could be looked up dynamically
+        # (eval/exec/getattr/globals with a compound expression) — be safe.
         string_values = set()
         for child in ast.walk(node):
             if isinstance(child, ast.Constant) and isinstance(child.value, str):
@@ -385,7 +517,8 @@ class RenameTransformer(ast.NodeTransformer):
                 continue
             if name in nested_refs:
                 continue
-            if name in string_values:
+            if any(re.search(r"\b%s\b" % re.escape(name), s)
+                   for s in string_values):
                 continue
             # The name must actually be used as a local (assigned names
             # are); also never rename a name that is only a parameter
@@ -419,7 +552,11 @@ class RenameTransformer(ast.NodeTransformer):
         if node.args.kwarg is not None and node.args.kwarg.annotation is not None:
             node.args.kwarg.annotation = self.visit(node.args.kwarg.annotation)
 
-        mapping = self._function_mapping(node)
+        mapping = self._precomputed.get(id(node))
+        if mapping is None:
+            # Not reached via visit_Module (e.g. visiting a lone
+            # function node): compute the mapping on the spot.
+            mapping = self._function_mapping(node)
         self._scope_stack.append(mapping)
         # Rename parameter names themselves.
         for arg in (
@@ -450,12 +587,14 @@ class RenameTransformer(ast.NodeTransformer):
         node.args.kw_defaults = [
             self.visit(d) if d is not None else None for d in node.args.kw_defaults
         ]
-        # Build a lambda-scoped mapping from its parameters only.
-        taken = set()
-        for child in ast.walk(node.body):
-            if isinstance(child, ast.Name):
-                taken.add(child.id)
-        mapping = {}
+        # Lambda parameters are deliberately NOT renamed: a lambda is
+        # usually bound to a name and may be called with keyword
+        # arguments (``f = lambda x: ...; f(x=1)``), and there is no
+        # registry entry for a lambda, so renaming a parameter would
+        # break the keyword call. The identity mapping keeps each
+        # parameter shadowing any same-named enclosing local, so body
+        # references still resolve to the parameter; references to
+        # renamed enclosing locals still resolve through the stack.
         params = (
             list(node.args.posonlyargs) + list(node.args.args)
             + list(node.args.kwonlyargs)
@@ -464,17 +603,7 @@ class RenameTransformer(ast.NodeTransformer):
             params.append(node.args.vararg)
         if node.args.kwarg is not None:
             params.append(node.args.kwarg)
-        for arg in params:
-            name = arg.arg
-            if name in _NEVER_RENAME or _is_dunder(name) or name.startswith("__"):
-                continue
-            if name in self._imported:
-                continue
-            new = self._new_name(taken)
-            taken.add(new)
-            mapping[name] = new
-            arg.arg = new
-        self._scope_stack.append(mapping)
+        self._scope_stack.append({a.arg: a.arg for a in params})
         node.body = self.visit(node.body)
         self._scope_stack.pop()
         return node
@@ -548,6 +677,60 @@ class RenameTransformer(ast.NodeTransformer):
         new = self._lookup(node.id)
         if new is not None:
             node.id = new
+        return node
+
+    def visit_Call(self, node):
+        # Keyword arguments are plain strings, never Name nodes, so the
+        # callee's parameter renames must be applied here explicitly.
+        # Only when the callee is a bare Name that is NOT a renamed
+        # local (i.e. it resolves to a module-level binding) and is in
+        # the registry: a local (closure variable, shadowing assignment,
+        # lambda) must not get registry treatment. Attribute calls
+        # (obj.method(...)) are never rewritten here — see
+        # _build_registry for how method parameters are protected.
+        registry_mapping = None
+        if isinstance(node.func, ast.Name):
+            callee = node.func.id
+            if self._lookup(callee) is None:
+                registry_mapping = self._registry.get(callee)
+        node = self.generic_visit(node)
+        if registry_mapping:
+            for kw in node.keywords:
+                if kw.arg is not None and kw.arg in registry_mapping:
+                    kw.arg = registry_mapping[kw.arg]
+                elif kw.arg is None and isinstance(kw.value, ast.Dict):
+                    # Literal-dict ** unpacking: rename matching keys.
+                    for key in kw.value.keys:
+                        if (isinstance(key, ast.Constant)
+                                and isinstance(key.value, str)
+                                and key.value in registry_mapping):
+                            key.value = registry_mapping[key.value]
+        return node
+
+    def visit_MatchAs(self, node):
+        # Capture bindings are plain strings, like except-handler names:
+        # rename them via the enclosing scope's mapping.
+        if node.name:
+            new = self._lookup(node.name)
+            if new is not None:
+                node.name = new
+        self.generic_visit(node)
+        return node
+
+    def visit_MatchStar(self, node):
+        if node.name:
+            new = self._lookup(node.name)
+            if new is not None:
+                node.name = new
+        self.generic_visit(node)
+        return node
+
+    def visit_MatchMapping(self, node):
+        if node.rest:
+            new = self._lookup(node.rest)
+            if new is not None:
+                node.rest = new
+        self.generic_visit(node)
         return node
 
     def visit_ExceptHandler(self, node):

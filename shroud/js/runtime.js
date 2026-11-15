@@ -153,7 +153,15 @@ if (__SHROUD_ANTI_DEBUG__) {
  * check is skipped, so protected scripts still run under Node. */
 (function () {
   var _domains = __SHROUD_DOMAINS__;
-  if (_domains.length && typeof location !== "undefined" && location && location.hostname && _domains.indexOf(location.hostname) === -1) {
-    throw new Error("SHROUD: domain not allowed: " + location.hostname);
+  if (_domains.length && typeof location !== "undefined" && location && location.hostname) {
+    // Hostnames are case-insensitive: compare lowercased on both sides.
+    var _host = String(location.hostname).toLowerCase();
+    var _allowed = false;
+    for (var i = 0; i < _domains.length; i++) {
+      if (String(_domains[i]).toLowerCase() === _host) { _allowed = true; break; }
+    }
+    if (!_allowed) {
+      throw new Error("SHROUD: domain not allowed: " + location.hostname);
+    }
   }
 })();

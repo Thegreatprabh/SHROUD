@@ -1,9 +1,10 @@
 """Tests for the SHROUD CLI (shroud.cli / python -m shroud).
 
-Engine-dependent tests are written against the engine contract in the
-task (shroud.js.engine / shroud.py.engine). They fail while the engine
-workers' code has not landed yet; that is expected and reported, not
-worked around here.
+Covers the protect / inspect / verify / demo subcommands end to end
+against the real JS and Python engines: protecting small files and
+directories, detecting protection markers in genuine protected
+output, comparing original vs protected behaviour, and clean
+``Error:`` + exit 1 failures.
 """
 
 import io
@@ -187,6 +188,17 @@ _MARKER_JS = (
 )
 
 
+# Source with strings and a flattenable function, so every Python
+# protection has something to act on. Used by the inspect tests below,
+# which protect real output instead of hand-written marker text.
+_MARKER_PY = (
+    'def greet(name):\n'
+    '    return "Hello, " + name\n'
+    '\n'
+    'print(greet("World"))\n'
+)
+
+
 class TestInspect(unittest.TestCase):
     def _protect_marker_js(self, tmp, config_text=None):
         src = Path(tmp) / "marker.js"
@@ -271,14 +283,18 @@ class TestInspect(unittest.TestCase):
             self.assertIn("anti-debug: absent", out)
 
     def test_inspect_detects_py_markers(self):
+        # Inspect genuine protected output (mirrors the JS marker
+        # tests): protect a small .py source with strings and a
+        # flattenable function, then inspect the real output.
         with tempfile.TemporaryDirectory() as tmp:
-            fake = Path(tmp) / "protected.py"
-            fake.write_text(
-                "from shroud_runtime import dec as shroud_runtime.dec\n"
-                "__state = 0\n",
-                encoding="utf-8",
+            src = Path(tmp) / "marker.py"
+            src.write_text(_MARKER_PY, encoding="utf-8")
+            out_dir = Path(tmp) / "out"
+            code, _out, err = run_main(
+                ["protect", str(src), "--engine", "py", "--out", str(out_dir)]
             )
-            code, out, _err = run_main(["inspect", str(fake)])
+            self.assertEqual(code, 0, err)
+            code, out, _err = run_main(["inspect", str(out_dir / "marker.py")])
             self.assertEqual(code, 0)
             self.assertIn("engine guess: py", out)
             self.assertIn("string decoder: present", out)

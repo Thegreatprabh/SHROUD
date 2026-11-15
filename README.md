@@ -67,8 +67,8 @@ Without installing, the CLI also runs from the repository root as
 
 ### Node dependencies (JavaScript engine only)
 
-The JavaScript engine parses code with `esprima` and re-emits it with
-`escodegen`. If the JS engine reports missing Node dependencies,
+The JavaScript engine parses code with `acorn` and re-emits it with
+`astring`. If the JS engine reports missing Node dependencies,
 install them from the repository root:
 
 ```bash
@@ -140,7 +140,8 @@ directory (scanned recursively; other files are ignored).
   the file extension — `.js` goes to the JavaScript engine, `.py` to
   the Python engine.
 - `--out <dir>` (required): output directory, created if needed.
-  Protected files keep their original file names.
+  Protected files keep their original file names; for a directory
+  input the subdirectory layout is preserved in the output directory.
 - `--config FILE`: YAML configuration file (see below). Without it,
   the built-in defaults are used.
 - `--seed N`: seed for deterministic protection. The same seed and the
@@ -249,6 +250,8 @@ Validation rules (`shroud/config.py`):
 
 - **Rename.** Local identifiers are replaced with short generated
   names, so the code no longer reads as the author's vocabulary.
+  Functions that contain a direct `eval(...)` call or a `with`
+  statement are not renamed, so their dynamic lookups keep working.
 - **String encryption.** String literals are replaced with encoded
   blobs decoded at runtime by an inline `_shroud_dec` decoder.
 - **Control-flow flattening.** Straight-line code is rewritten into a
@@ -272,7 +275,11 @@ Validation rules (`shroud/config.py`):
   parameters to `_sXXXX` names. Module-level names, class names,
   attribute names, imported names, dunder names, `self`/`cls`,
   `global`/`nonlocal` names, and names read by a nested scope
-  (closures) are never renamed, so behaviour is preserved.
+  (closures) are never renamed, so behaviour is preserved. Keyword
+  arguments are renamed at call sites for plain module-level
+  functions, and `match` capture patterns (`case x:`) are renamed,
+  so those constructs keep working; lambda parameters are never
+  renamed, so a lambda called with keyword arguments keeps working.
 - **String encryption.** Plain string constants are replaced with
   `shroud_runtime.dec("<base64>")` calls. The runtime XOR-decodes
   them with the key embedded in the delivered `shroud_runtime.py`.
@@ -312,6 +319,16 @@ Verified against the Python engine implementation
   (`globals()`, `getattr` by string, `eval`) keeps working because the
   names it looks up are not renamed — but those same names stay
   readable in the protected output.
+- **Python renaming leaves some dynamic shapes alone.** `match`
+  literal patterns (integers and strings) are never rewritten, so
+  `case 42:` stays `42`. `eval`/`exec` strings are only left alone
+  when they mention a renamed name as a whole word — the guard is
+  textual, not semantic. A function called with a non-literal `**`
+  unpacking (`f(**d)`) or aliased by direct assignment (`g = f`)
+  keeps its parameters unrenamed, so those calls keep working.
+  Still uncovered: aliasing through a container, argument, or return
+  value, and passing a function by reference to code that calls it
+  with keyword arguments.
 - **The Python runtime is delivered with the code.** `shroud_runtime.py`
   contains the decryption key in base64, the integrity manifest, and
   the license hash. Anyone with the output directory can read it.
@@ -320,7 +337,10 @@ For the JavaScript engine, the same honest limits apply in general
 form: constructs the engine cannot rewrite safely are left as-is
 rather than risking broken code, so dynamically computed names,
 `eval`, and template literals with embedded expressions stay more
-readable than plain code; and the decoder and its key ship inside the
+readable than plain code; functions containing a direct `eval(...)`
+call or a `with` statement are not renamed at all. Modern JavaScript
+(optional chaining, nullish coalescing, private class fields, through
+ES2025) parses via `acorn`. The decoder and its key ship inside the
 protected file itself. Domain lock and integrity checks only run in
 the environment the code executes in, and can be removed by editing
 the delivered file.
@@ -344,9 +364,9 @@ contract, and verification is part of using the tool.
 | `shroud/demo/demo.py` | Bundled Python demo (strings, arithmetic, control flow, functions, dicts/lists, a class) |
 | `shroud/js/engine.py` | JavaScript engine wrapper: `protect_js`, `protect_js_file`, `ensure_node_deps` |
 | `shroud/js/__init__.py` | Package marker for the JavaScript engine |
-| `shroud/js/node/package.json` | Node dependencies for the JS engine (`esprima`, `escodegen`) |
+| `shroud/js/node/package.json` | Node dependencies for the JS engine (`acorn`, `astring`) |
 | `shroud/js/node/package-lock.json` | Pinned Node dependency versions |
-| `shroud/js/node/protect.js` | JavaScript transforms on the esprima AST (rename, string encryption, flattening, literal encoding, dead code) and runtime assembly |
+| `shroud/js/node/protect.js` | JavaScript transforms on the acorn AST (rename, string encryption, flattening, literal encoding, dead code) and runtime assembly |
 | `shroud/js/runtime.js` | Runtime template prepended to protected JavaScript (string decoder, integrity, anti-debug, domain lock) |
 | `shroud/py/engine.py` | Python engine wrapper: `protect_py`, `protect_py_file`, `protect_py_dir`, `write_runtime` |
 | `shroud/py/__init__.py` | Package marker; re-exports the Python engine functions |

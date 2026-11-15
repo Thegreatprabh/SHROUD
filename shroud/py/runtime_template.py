@@ -3,7 +3,11 @@
 Placeholders (substituted at build time by ``engine.write_runtime``):
   ``__SHROUD_KEY__``                base64-encoded decryption key bytes
   ``__SHROUD_LICENSE_HASH__``       hex sha256 of the license key, or empty
-  ``__SHROUD_INTEGRITY_MANIFEST__`` JSON string {relative_path: sha256}, or empty
+  ``__SHROUD_INTEGRITY_MANIFEST__`` repr() of the JSON string
+  {relative_path: sha256}, or repr("") when integrity is off — the
+  placeholder sits UNQUOTED in the template (``= __SHROUD_...__``)
+  because the repr supplies the quotes, so filenames containing
+  quotes, backslashes or unicode stay valid Python
   ``__SHROUD_ANTI_DEBUG__``         ``True`` or ``False``
 
 Honest limit: this runtime protects code by raising the cost of reversal,
@@ -25,7 +29,7 @@ import sys
 
 _SHROUD_KEY = base64.b64decode("__SHROUD_KEY__")
 _SHROUD_LICENSE_HASH = "__SHROUD_LICENSE_HASH__"
-_SHROUD_INTEGRITY_MANIFEST = '__SHROUD_INTEGRITY_MANIFEST__'
+_SHROUD_INTEGRITY_MANIFEST = __SHROUD_INTEGRITY_MANIFEST__
 _SHROUD_ANTI_DEBUG = __SHROUD_ANTI_DEBUG__
 
 
@@ -50,6 +54,13 @@ def check() -> None:
     """
     if _SHROUD_ANTI_DEBUG and sys.gettrace() is not None:
         raise RuntimeError("SHROUD: debugger/tracer detected")
+    # Python 3.12+ sys.monitoring tracers are invisible to gettrace().
+    # getattr guard: sys.monitoring does not exist on older Pythons.
+    monitoring = getattr(sys, "monitoring", None)
+    if _SHROUD_ANTI_DEBUG and monitoring is not None:
+        for tool_id in range(4):
+            if monitoring.get_tool(tool_id) is not None:
+                raise RuntimeError("SHROUD: debugger/tracer detected")
     if _SHROUD_INTEGRITY_MANIFEST:
         try:
             manifest = json.loads(_SHROUD_INTEGRITY_MANIFEST)

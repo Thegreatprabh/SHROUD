@@ -98,5 +98,110 @@ class TestWheelPackaging(unittest.TestCase):
             )
 
 
+def _run(cmd, timeout, **kwargs):
+    """Run ``cmd``; raise AssertionError with output on failure."""
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout, **kwargs
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "command failed (%s): %s\nstdout:\n%s\nstderr:\n%s"
+            % (result.returncode, " ".join(str(c) for c in cmd),
+               result.stdout, result.stderr)
+        )
+    return result
+
+
+def _npm_reachable():
+    """True when the npm registry answers (needed for the JS engine's
+    first-use `npm install` inside the installed wheel)."""
+    try:
+        result = subprocess.run(
+            ["npm", "ping", "--registry", "https://registry.npmjs.org"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+class TestInstalledWheelEndToEnd(unittest.TestCase):
+    def test_installed_wheel_protects_py_and_js(self):
+        # L5: file-presence checks cannot catch a packaging regression
+        # that breaks the installed CLI (missing entry point, missing
+        # data files at runtime, missing dependency). Install the built
+        # wheel into a fresh venv (non-editable, as a user would) and
+        # run `shroud protect` there for both engines.
+        with tempfile.TemporaryDirectory(prefix="shroud-installed-") as tmp:
+            tmp = pathlib.Path(tmp)
+            src = tmp / "src"
+            out = tmp / "out"
+            out.mkdir()
+            shutil.copytree(REPO_ROOT, src, ignore=_COPY_IGNORE)
+            wheel_path = _build_wheel(src, out)
+
+            venv_dir = tmp / "venv"
+            # venv creation + pip install is slow; generous timeouts.
+            _run([sys.executable, "-m", "venv", str(venv_dir)], timeout=300)
+            venv_python = venv_dir / "bin" / "python"
+            _run(
+                [str(venv_python), "-m", "pip", "install", "--quiet",
+                 str(wheel_path)],
+                timeout=600,
+            )
+            shroud_bin = venv_dir / "bin" / "shroud"
+            self.assertTrue(
+                shroud_bin.is_file(),
+                "installed wheel provides no `shroud` console script",
+            )
+
+            work = tmp / "work"
+            work.mkdir()
+            (work / "small.py").write_text(
+                "def add(a, b):\n    return a + b\n\nprint(add(2, 3))\n",
+                encoding="utf-8",
+            )
+            out_dir = work / "out"
+            result = _run(
+                [str(shroud_bin), "protect", str(work / "small.py"),
+                 "--engine", "py", "--out", str(out_dir)],
+                timeout=300,
+            )
+            self.assertIn("Protected 1 file(s)", result.stdout)
+            self.assertTrue((out_dir / "small.py").is_file())
+            self.assertTrue((out_dir / "shroud_runtime.py").is_file())
+            ran = _run(
+                [str(venv_python), str(out_dir / "small.py")],
+                timeout=60, cwd=str(out_dir),
+            )
+            self.assertEqual(ran.stdout, "5\n")
+
+            # JS engine in the installed wheel: its first use runs
+            # `npm install` inside the installed package dir, so it
+            # needs the npm registry. Skip only the JS half when the
+            # registry is unreachable (the Python half above already
+            # proves the installed CLI works).
+            if not _npm_reachable():
+                print("npm registry unreachable; skipping JS half of "
+                      "installed-wheel test")
+                return
+            (work / "small.js").write_text(
+                "function add(a, b) { return a + b; }\n"
+                "console.log(add(2, 3));\n",
+                encoding="utf-8",
+            )
+            js_out = work / "out-js"
+            result = _run(
+                [str(shroud_bin), "protect", str(work / "small.js"),
+                 "--engine", "js", "--out", str(js_out)],
+                timeout=300,
+            )
+            self.assertIn("Protected 1 file(s)", result.stdout)
+            ran = _run(
+                ["node", str(js_out / "small.js")], timeout=60,
+            )
+            self.assertEqual(ran.stdout, "5\n")
+
+
 if __name__ == "__main__":
     unittest.main()

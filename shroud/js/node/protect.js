@@ -1,8 +1,10 @@
 "use strict";
 /* SHROUD JavaScript protector (v1).
  *
- * Parses the input with esprima, applies AST transforms, emits with
- * escodegen, and prepends the runtime template (shroud/js/runtime.js).
+ * Parses the input with acorn (modern syntax: optional chaining,
+ * nullish coalescing, private class fields, ...), applies AST
+ * transforms, emits with astring, and prepends the runtime template
+ * (shroud/js/runtime.js).
  *
  * Usage:
  *   node protect.js --input <file> --output <file> --options <json file>
@@ -21,15 +23,17 @@
  *   no try/switch/labels, and whose returns sit only at the top level or
  *   inside if/else branches (switch cases share one scope, and a `break`
  *   rewritten for a return must target the switch).
- * - Renaming is conservative: a name is renamed only if it is declared
- *   exactly once inside a single function tree and never collides with a
- *   global or another renamed name.
+ * - Renaming is per-scope: a name declared in a scope is renamed for
+ *   that scope (references resolve via the scope chain), and never
+ *   collides with a global or another renamed name. Functions that
+ *   contain a direct `eval(...)` call or a `with` statement are not
+ *   renamed at all: dynamic lookup can read their locals by string.
  */
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const esprima = require("esprima");
-const escodegen = require("escodegen");
+const acorn = require("acorn");
+const astring = require("astring");
 
 /* ------------------------------------------------------------------ */
 /* CLI                                                                 */
@@ -61,10 +65,10 @@ function main() {
   const source = fs.readFileSync(args.input, "utf8");
   let ast;
   try {
-    ast = esprima.parseScript(source, { tolerant: true });
+    ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "script" });
   } catch (e) {
     try {
-      ast = esprima.parseModule(source, { tolerant: true });
+      ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "module" });
     } catch (e2) {
       console.error("SHROUD: parse error: " + (e2.message || e2));
       process.exit(1);
@@ -219,12 +223,44 @@ function analyzeScopes(ast) {
   const programScope = newScope(null, "program");
   scopes.push(programScope);
 
+  // Function scopes tainted by a direct `eval(...)` call or a `with`
+  // statement anywhere inside them: dynamic lookup can read locals by
+  // string, so no name in a tainted function may be renamed.
+  const taintedFuncs = new Set();
+
+  /* Mark `scope`'s function and every enclosing function as tainted: a
+   * direct eval / `with` inside a nested function sees enclosing
+   * function locals through the scope chain. */
+  function markTainted(scope) {
+    let s = scope;
+    while (s) {
+      const f = s.func;
+      if (!f || f === programScope) return; // program scope is never renamed
+      taintedFuncs.add(f);
+      s = f.parent;
+    }
+  }
+
   function isLexicalDecl(node) {
     return node.type === "VariableDeclaration" && (node.kind === "let" || node.kind === "const");
   }
 
   function walk(node, scope, rootId) {
     if (!isNode(node)) return;
+    // Direct eval / with: taint every enclosing function root. Only a
+    // direct call (callee is exactly the Identifier `eval`) can see
+    // locals; indirect eval ((0, eval), window.eval, eval.call) runs in
+    // global scope and cannot, so it does not taint.
+    if (node.type === "WithStatement") {
+      markTainted(scope);
+    } else if (
+      node.type === "CallExpression" &&
+      node.callee &&
+      node.callee.type === "Identifier" &&
+      node.callee.name === "eval"
+    ) {
+      markTainted(scope);
+    }
     // A bare Identifier reached directly (e.g. `var {...} = obj`, a
     // parameter default, a for-test) is a reference. Identifiers met as
     // children are classified by walkChildren instead, so this case only
@@ -410,7 +446,7 @@ function analyzeScopes(ast) {
   }
 
   walk(ast, programScope, "program");
-  return { scopes, occurrences, programScope };
+  return { scopes, occurrences, programScope, taintedFuncs };
 }
 
 /* Resolve a reference: innermost scope (starting at `scope`) that declares
@@ -425,28 +461,13 @@ function resolveScope(scope, name) {
 }
 
 function renameIdentifiers(ast, seed) {
-  const { occurrences, programScope } = analyzeScopes(ast);
+  const { occurrences, programScope, taintedFuncs } = analyzeScopes(ast);
 
-  // Group scopes by their function root (program root = "program").
-  const roots = new Map(); // rootId -> { declCount: Map<name, count>, scopes: [] }
-  function rootOf(scope) {
-    return scope.root;
-  }
-  // Count, per root, how many scopes declare each name.
-  const perRoot = new Map();
   const allScopes = [];
   (function collect(scope) {
     allScopes.push(scope);
     for (const c of scope.children) collect(c);
   })(programScope);
-  for (const s of allScopes) {
-    const r = rootOf(s);
-    if (!perRoot.has(r)) perRoot.set(r, new Map());
-    const m = perRoot.get(r);
-    for (const name of s.declared.keys()) {
-      m.set(name, (m.get(name) || 0) + 1);
-    }
-  }
 
   // Deterministic counter; the seed shifts the start so different seeds
   // produce different names (the key also differs per seed).
@@ -471,11 +492,15 @@ function renameIdentifiers(ast, seed) {
   const renameMap = new Map();
   for (const s of allScopes) {
     if (s.root === "program") continue; // never rename program-scope names
-    const counts = perRoot.get(s.root);
+    if (taintedFuncs.has(s.func)) continue; // direct eval/with: dynamic lookup
     const map = new Map();
     for (const [name] of s.declared) {
       if (isReserved(name)) continue;
-      if (counts.get(name) !== 1) continue; // shadowed somewhere in this function tree
+      // Renaming is per-scope and references resolve via the scope
+      // chain, so a name declared in several sibling scopes (e.g. `let`
+      // in two blocks) gets one fresh name per scope; `var` redeclared
+      // in one function lands in the single function scope and is
+      // deduped by declareIn.
       map.set(name, freshName());
     }
     if (map.size) renameMap.set(s, map);
@@ -1017,7 +1042,7 @@ function protect(ast, options) {
   if (options.string_encryption !== false) encryptStrings(ast, keyBytes, table);
   if (options.dead_code !== false) injectDeadCode(ast, rng);
 
-  let code = escodegen.generate(ast);
+  let code = astring.generate(ast);
 
   // Runtime template with placeholder substitution.
   const runtimePath = path.join(__dirname, "..", "runtime.js");

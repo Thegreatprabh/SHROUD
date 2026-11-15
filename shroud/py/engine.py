@@ -119,8 +119,11 @@ def _license_hash(opts) -> str:
 def protect_py(source: str, options: dict) -> str:
     """Return protected Python source.
 
-    Output starts with ``import shroud_runtime`` and a
-    ``shroud_runtime.check()`` call. Encrypted strings call
+    The output contains ``import shroud_runtime`` and a
+    ``shroud_runtime.check()`` call, inserted after any leading
+    ``from __future__ import ...`` statements and after the module
+    docstring (if present), so future imports stay legal and
+    ``__doc__`` survives. Encrypted strings call
     ``shroud_runtime.dec(...)``. Raises :class:`ProtectionError` if the
     source does not parse or the protected output does not compile.
     """
@@ -134,6 +137,29 @@ def protect_py(source: str, options: dict) -> str:
         raise ProtectionError("invalid Python source: %s" % exc) from exc
 
     key = _key_bytes(opts)
+
+    # The module docstring — the string Expr that is either the very
+    # first statement or the first statement after any leading future
+    # imports — is lifted out before the transforms run: the string
+    # encryptor only recognises a docstring at body[0], so with a
+    # future import first it would encrypt the docstring into a dec()
+    # call and __doc__ would be lost. It is restored below, before
+    # the runtime header is inserted after it.
+    doc_node = None
+    doc_index = 0
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            doc_index += 1
+        else:
+            break
+    if doc_index < len(tree.body):
+        first = tree.body[doc_index]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            doc_node = tree.body.pop(doc_index)
 
     if opts.get("rename"):
         tree = RenameTransformer(seed=seed).visit(tree)
@@ -151,14 +177,40 @@ def protect_py(source: str, options: dict) -> str:
         tree = add_dead_code(tree, seed=seed)
         ast.fix_missing_locations(tree)
 
+    # Restore the lifted module docstring (see above) at its original
+    # position, then insert the runtime header after the leading
+    # prefix — the module docstring (only the very first statement
+    # counts as one; it must stay first for __doc__ to survive) and
+    # any leading `from __future__` imports (which must stay near the
+    # top). A stray string literal after the future imports is skipped
+    # too, so the header never lands before it.
+    header = [
+        ast.parse("import shroud_runtime").body[0],
+        ast.parse("shroud_runtime.check()").body[0],
+    ]
+    if doc_node is not None:
+        tree.body[doc_index:doc_index] = [doc_node]
+    insert_at = 0
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            insert_at += 1
+        elif (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            insert_at += 1
+        else:
+            break
+    tree.body[insert_at:insert_at] = header
+    ast.fix_missing_locations(tree)
+
     try:
-        body = ast.unparse(tree)
+        output = ast.unparse(tree)
     except Exception as exc:  # pragma: no cover - unparse failure
         raise ProtectionError("failed to render protected source: %s" % exc) from exc
-
-    output = "import shroud_runtime\nshroud_runtime.check()\n"
-    if body:
-        output += body + "\n"
+    if output:
+        output += "\n"
 
     # The protected output must be valid Python.
     try:
@@ -177,7 +229,7 @@ def protect_py_file(src_path, dst_path, options) -> None:
     dst = Path(dst_path)
     try:
         source = src.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ProtectionError("cannot read %s: %s" % (src, exc)) from exc
     protected = protect_py(source, options)
     try:
@@ -226,7 +278,12 @@ def write_runtime(out_dir, options) -> str:
     license_hash = _license_hash(opts)
     anti_debug = bool(opts.get("anti_debug"))
     if opts.get("integrity"):
-        manifest = _manifest_for_dir(out)
+        try:
+            manifest = _manifest_for_dir(out)
+        except OSError as exc:
+            raise ProtectionError(
+                "cannot compute integrity manifest for %s: %s" % (out, exc)
+            ) from exc
         manifest_json = json.dumps(manifest, sort_keys=True)
     else:
         manifest = {}
@@ -235,7 +292,11 @@ def write_runtime(out_dir, options) -> str:
     runtime_source = (
         RUNTIME_TEMPLATE.replace("__SHROUD_KEY__", key_b64)
         .replace("__SHROUD_LICENSE_HASH__", license_hash)
-        .replace("__SHROUD_INTEGRITY_MANIFEST__", manifest_json)
+        # repr() so the JSON is a valid Python string literal no matter
+        # what characters the filenames contain (quotes, backslashes,
+        # unicode); repr("") is "''", falsy, so the check stays skipped
+        # when integrity is off.
+        .replace("__SHROUD_INTEGRITY_MANIFEST__", repr(manifest_json))
         .replace("__SHROUD_ANTI_DEBUG__", "True" if anti_debug else "False")
     )
     # The template must not leave any placeholder behind.

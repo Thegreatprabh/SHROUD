@@ -1,7 +1,7 @@
 """Python wrapper for the SHROUD JavaScript engine.
 
 The real transforms live in Node (``shroud/js/node/protect.js``) on the
-esprima AST; this module validates the environment, derives the per-build
+acorn AST; this module validates the environment, derives the per-build
 string-encryption key, and shells out to Node.
 
 Honest limit: protection raises the cost of reversal, it does not make it
@@ -14,12 +14,13 @@ import random
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 from shroud.errors import ProtectionError
 
 _NODE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "node")
 _PROTECT_JS = os.path.join(_NODE_DIR, "protect.js")
-_REQUIRED_PKGS = ("esprima", "escodegen")
+_REQUIRED_PKGS = ("acorn", "astring")
 
 DEFAULT_OPTIONS = {
     "rename": True,
@@ -52,7 +53,7 @@ def _merge_options(options):
 
 
 def ensure_node_deps():
-    """Make sure Node, npm and the esprima/escodegen deps are available.
+    """Make sure Node, npm and the acorn/astring deps are available.
 
     Installs the Node deps automatically (``npm install``) when
     ``node_modules`` is missing. Raises ProtectionError with install
@@ -141,9 +142,20 @@ def protect_js(source: str, options: dict) -> str:
 
 
 def protect_js_file(src_path, dst_path, options) -> None:
-    """Protect the file at ``src_path`` and write the result to ``dst_path``."""
-    with open(src_path, encoding="utf-8") as f:
-        source = f.read()
+    """Protect the file at ``src_path`` and write the result to ``dst_path``.
+
+    The destination parent directory is created when missing (parity
+    with the Python engine). Read/write failures raise ProtectionError.
+    """
+    src = Path(src_path)
+    dst = Path(dst_path)
+    try:
+        source = src.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ProtectionError("cannot read %s: %s" % (src, exc)) from exc
     protected = protect_js(source, options)
-    with open(dst_path, "w", encoding="utf-8") as f:
-        f.write(protected)
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(protected, encoding="utf-8")
+    except OSError as exc:
+        raise ProtectionError("cannot write %s: %s" % (dst, exc)) from exc

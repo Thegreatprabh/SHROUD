@@ -164,7 +164,7 @@ class TestStringEncryption(JsEngineTestBase):
         # Documented limit: template literals are not encrypted.
         src = "var who = 'World';\nconsole.log(`Hello ${who}!`);\n"
         protected = self.protect(src)
-        # escodegen re-spaces the interpolation; the template itself stays.
+        # astring re-spaces the interpolation; the template itself stays.
         self.assertIsNotNone(
             re.search(r"`Hello \$\{\s*who\s*\}!`", protected)
         )
@@ -329,8 +329,8 @@ class TestRoundTrip(JsEngineTestBase):
             "..", "shroud", "js", "node",
         )
         script = (
-            "const esprima=require('esprima');"
-            "const escodegen=require('escodegen');"
+            "const acorn=require('acorn');"
+            "const astring=require('astring');"
             "const src=%s;"
             "const outs=[];"
             "const realLog=console.log;"
@@ -338,7 +338,7 @@ class TestRoundTrip(JsEngineTestBase):
             "const before=outs.length;"
             "eval(src);"
             "const first=outs.slice(before);"
-            "const gen=escodegen.generate(esprima.parseScript(src));"
+            "const gen=astring.generate(acorn.parse(src,{ecmaVersion:'latest'}));"
             "const mark=outs.length;"
             "eval(gen);"
             "const second=outs.slice(mark);"

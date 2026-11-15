@@ -356,16 +356,41 @@ class TestDeadCode(unittest.TestCase):
 class TestEngine(unittest.TestCase):
     def test_protect_py_header(self):
         protected = protect_py(TEST_PROGRAM, dict(ALL_ON_SEED))
-        self.assertTrue(protected.startswith("import shroud_runtime\n"))
+        # The runtime header is inserted after the module docstring
+        # (and any leading `from __future__` imports), so it is not
+        # necessarily the first statement — but it must be present
+        # before the rest of the program. TEST_PROGRAM starts with a
+        # module docstring, so the import is the second statement.
+        tree = ast.parse(protected)
+        self.assertIsInstance(tree.body[0], ast.Expr)  # module docstring
+        header = tree.body[1]
+        self.assertIsInstance(header, ast.Import)
+        self.assertEqual([a.name for a in header.names], ["shroud_runtime"])
         self.assertIn("shroud_runtime.check()", protected)
         ast.parse(protected)
         compile(protected, "<shroud>", "exec")
 
     def test_all_transforms_off_is_parse_unparse_identity(self):
         protected = protect_py(TEST_PROGRAM, dict(ALL_OFF, seed=42))
-        body = "\n".join(protected.splitlines()[2:])
+        tree = ast.parse(protected)
+        body = list(tree.body)
+        # Drop the two runtime-header statements (import + check call);
+        # they sit after the module docstring, not at the top.
+        idx = next(
+            i
+            for i, node in enumerate(body)
+            if isinstance(node, ast.Import)
+            and any(a.name == "shroud_runtime" for a in node.names)
+        )
+        check = body[idx + 1]
+        self.assertIsInstance(check, ast.Expr)
+        self.assertIsInstance(check.value, ast.Call)
+        self.assertIsInstance(check.value.func, ast.Attribute)
+        self.assertEqual(check.value.func.attr, "check")
+        del body[idx:idx + 2]
+        tree.body = body
         self.assertEqual(ast.dump(ast.parse(TEST_PROGRAM)),
-                         ast.dump(ast.parse(body)))
+                         ast.dump(tree))
 
     def test_all_transforms_on_behaviour(self):
         orig, prot, _ = _run_pair(TEST_PROGRAM, dict(ALL_ON_SEED))
